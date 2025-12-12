@@ -11,13 +11,16 @@ import subprocess
 # Add the current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Use the current Python interpreter for subprocess calls
+PYTHON_EXE = sys.executable
+
 
 def test_cluster_mode_help():
     """Test that cluster mode options appear in help"""
     print("Testing cluster mode help options...")
     
     result = subprocess.run(
-        ['python3', 'genomeQC.py', '--help'],
+        [PYTHON_EXE, 'genomeQC.py', '--help'],
         capture_output=True,
         text=True
     )
@@ -44,7 +47,7 @@ def test_pbs_script_generation():
         
         # Run in cluster dry-run mode
         result = subprocess.run([
-            'python3', 'genomeQC.py',
+            PYTHON_EXE, 'genomeQC.py',
             '-g', str(genome_file),
             '-o', str(output_dir),
             '-t', '60',
@@ -99,7 +102,7 @@ def test_pbs_script_content():
         
         # Run with custom PBS parameters
         result = subprocess.run([
-            'python3', 'genomeQC.py',
+            PYTHON_EXE, 'genomeQC.py',
             '-g', str(genome_file),
             '-o', str(output_dir),
             '-t', '60',
@@ -151,7 +154,7 @@ def test_multiple_busco_databases():
         output_dir = Path(tmpdir) / 'output'
         
         result = subprocess.run([
-            'python3', 'genomeQC.py',
+            PYTHON_EXE, 'genomeQC.py',
             '-g', str(genome_file),
             '-o', str(output_dir),
             '-t', '60',

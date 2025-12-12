@@ -86,15 +86,18 @@ class PBSJobManager:
             "# Setup logging",
             "mkdir -p $WD/log",
             "TIME=`date +%m%d_%H%M`",
-            f'exec > >(tee -a $WD/log/{job_name}_$TIME.log $WD/log/{job_name}_$TIME.out) 2> >(tee -a $WD/log/{job_name}_$TIME.err $WD/log/{job_name}_$TIME.out >&2)',
+            "# Redirect stdout and stderr to log files with timestamps",
+            f'exec > >(tee -a $WD/log/{job_name}_$TIME.log $WD/log/{job_name}_$TIME.out) \\',
+            f'     2> >(tee -a $WD/log/{job_name}_$TIME.err $WD/log/{job_name}_$TIME.out >&2)',
             ""
         ])
         
-        # Add environment activation if specified
+        # Note: Environment activation is handled via 'micromamba run -n' in commands
+        # rather than using 'micromamba activate' which requires shell initialization
         if env_name:
             script_lines.extend([
-                "# Activate conda/micromamba environment",
-                f"#micromamba activate {env_name}",
+                f"# Note: Using 'micromamba run -n {env_name}' in commands below",
+                f"# instead of 'micromamba activate {env_name}' for better non-interactive execution",
                 ""
             ])
         
