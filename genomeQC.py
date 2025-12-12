@@ -5,7 +5,7 @@ Comprehensive genomic quality assessment using multiple tools including:
 - quartet/seqkit: telomere and gap analysis
 - BUSCO: completeness assessment
 - Merqury: QV calculation
-- LTR analysis: ltrharvest, TR_FINDER_parallel, LTR_retriever, LAI
+- LTR analysis: ltrharvest, LTR_retriever, LAI
 - QUAST: assembly statistics
 - GenomeSyn: synteny plots (optional)
 """
@@ -17,6 +17,7 @@ import subprocess
 import logging
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -157,8 +158,9 @@ class EnvironmentManager:
         if env_info['method'] == 'env':
             full_cmd = ['micromamba', 'run', '-n', env_info['name']] + command
         elif env_info['method'] == 'module':
-            # For module, we need to load it first
-            module_cmd = f"module load {env_info['name']} && {' '.join(command)}"
+            # For module, we need to load it first - properly escape all command parts
+            escaped_cmd = ' '.join(shlex.quote(str(arg)) for arg in command)
+            module_cmd = f"module load {shlex.quote(env_info['name'])} && {escaped_cmd}"
             full_cmd = ['bash', '-c', module_cmd]
         else:
             full_cmd = command
@@ -317,7 +319,19 @@ class GenomeQC:
         self.results['busco'] = {}
         
         for db in self.busco_dbs:
-            db_name = Path(db).name if Path(db).exists() else db
+            # Handle local vs remote database paths
+            db_path = Path(db)
+            is_local = db_path.exists()
+            
+            if is_local:
+                # Extract lineage name from path (e.g., /path/to/eukaryota_odb10 -> eukaryota_odb10)
+                db_name = db_path.name
+                lineage_name = db_name
+            else:
+                # Remote database, use as-is
+                db_name = db
+                lineage_name = db
+            
             logger.info(f"Running BUSCO with database: {db_name}")
             
             output_name = f"busco_{db_name}"
@@ -329,14 +343,17 @@ class GenomeQC:
                     '-o', output_name,
                     '-m', 'genome',
                     '-c', str(self.threads),
-                    '--offline' if Path(db).exists() else '--auto-lineage',
+                    '-l', lineage_name,
                 ]
                 
-                if Path(db).exists():
-                    cmd.extend(['--download_path', str(Path(db).parent)])
-                    cmd.extend(['-l', db])
+                if is_local:
+                    # For local databases, specify download path (parent directory) and use offline mode
+                    cmd.extend(['--download_path', str(db_path.parent)])
+                    cmd.append('--offline')
                 else:
-                    cmd.extend(['-l', db])
+                    # For remote databases, use auto-lineage if no specific lineage provided
+                    if db in ['auto', 'auto-lineage']:
+                        cmd.append('--auto-lineage')
                 
                 result = self.env_manager.run_command(
                     busco_env, cmd,
