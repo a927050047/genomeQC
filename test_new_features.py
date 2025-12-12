@@ -76,9 +76,11 @@ def test_command_line_args():
     assert '--organism-type' in result.stdout, "organism-type parameter not in help"
     assert '--min-telomere-length' in result.stdout, "min-telomere-length parameter not in help"
     assert 'plant' in result.stdout, "plant organism type not mentioned"
+    assert '--reads' in result.stdout, "reads parameter not in help"
     
     print("  ✓ organism-type parameter found in help")
     print("  ✓ min-telomere-length parameter found in help")
+    print("  ✓ reads parameter found in help")
     print("  ✓ Command-line arguments test passed")
 
 
@@ -122,6 +124,70 @@ def test_quartet_command_format():
     print("  ✓ Quartet command format test passed")
 
 
+def test_reads_parameter():
+    """Test that reads parameter is properly handled"""
+    print("\nTesting reads parameter...")
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False) as f:
+        f.write(">test\nATCG\n")
+        test_genome = f.name
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fastq', delete=False) as f:
+        f.write("@read1\nATCG\n+\nIIII\n")
+        test_reads1 = f.name
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fastq', delete=False) as f:
+        f.write("@read2\nGCTA\n+\nIIII\n")
+        test_reads2 = f.name
+    
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Test without reads
+            pipeline = GenomeQC(
+                genome_fasta=test_genome,
+                output_dir=tmpdir,
+                threads=1,
+                busco_dbs=['test_db'],
+                reads=None
+            )
+            
+            assert pipeline.reads is None, "Reads should be None when not provided"
+            print("  ✓ Pipeline accepts no reads (None)")
+            
+            # Test with single reads file
+            pipeline2 = GenomeQC(
+                genome_fasta=test_genome,
+                output_dir=tmpdir + "_2",
+                threads=1,
+                busco_dbs=['test_db'],
+                reads=[test_reads1]
+            )
+            
+            assert pipeline2.reads is not None, "Reads should not be None"
+            assert len(pipeline2.reads) == 1, "Should have 1 reads file"
+            print("  ✓ Pipeline accepts single reads file")
+            
+            # Test with multiple reads files
+            pipeline3 = GenomeQC(
+                genome_fasta=test_genome,
+                output_dir=tmpdir + "_3",
+                threads=1,
+                busco_dbs=['test_db'],
+                reads=[test_reads1, test_reads2]
+            )
+            
+            assert pipeline3.reads is not None, "Reads should not be None"
+            assert len(pipeline3.reads) == 2, "Should have 2 reads files"
+            print("  ✓ Pipeline accepts multiple reads files")
+            
+    finally:
+        Path(test_genome).unlink()
+        Path(test_reads1).unlink()
+        Path(test_reads2).unlink()
+    
+    print("  ✓ Reads parameter test passed")
+
+
 def main():
     """Run all validation tests"""
     print("=" * 60)
@@ -132,6 +198,7 @@ def main():
         test_quartet_parameters()
         test_command_line_args()
         test_quartet_command_format()
+        test_reads_parameter()
         
         print("\n" + "=" * 60)
         print("All validation tests passed! ✓")
@@ -142,6 +209,9 @@ def main():
         print("  • Minimum telomere length configuration")
         print("  • Enhanced LTR analysis pipeline with LTR_FINDER_parallel")
         print("  • QUAST --large flag for large genomes")
+        print("  • Optional sequencing reads support (--reads parameter)")
+        print("  • Merqury QV calculation with reads")
+        print("  • Coverage analysis with minimap2 and mosdepth")
         print("=" * 60)
         return 0
         
