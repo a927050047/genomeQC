@@ -20,6 +20,7 @@ import re
 import shlex
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +28,129 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+class PBSJobManager:
+    """Manage PBS/Torque job submission and script generation"""
+    
+    def __init__(self, queue: str = 'high', nodes: int = 1, ppn: int = 60, 
+                 walltime: str = '240:00:00', job_prefix: str = 'genomeQC'):
+        self.queue = queue
+        self.nodes = nodes
+        self.ppn = ppn
+        self.walltime = walltime
+        self.job_prefix = job_prefix
+        self.submitted_jobs = {}  # Track submitted job IDs
+        
+    def generate_pbs_script(self, job_name: str, commands: List[str], 
+                           working_dir: str, env_name: Optional[str] = None,
+                           dependencies: Optional[List[str]] = None) -> str:
+        """
+        Generate PBS job script content
+        
+        Args:
+            job_name: Name of the job
+            commands: List of commands to execute
+            working_dir: Working directory for the job
+            env_name: Optional conda/micromamba environment name
+            dependencies: Optional list of job IDs this job depends on
+            
+        Returns:
+            PBS script content as string
+        """
+        script_lines = [
+            "#!/bin/bash",
+            f"#PBS -N {job_name}",
+            f"#PBS -q {self.queue}",
+            f"#PBS -l nodes={self.nodes}:ppn={self.ppn}",
+            f"#PBS -j oe",
+            f"#PBS -l walltime={self.walltime}"
+        ]
+        
+        # Add job dependencies if specified
+        if dependencies:
+            dep_string = ":".join(dependencies)
+            script_lines.append(f"#PBS -W depend=afterok:{dep_string}")
+        
+        # Add environment setup and logging
+        script_lines.extend([
+            "",
+            "# Source bashrc for environment",
+            "source ~/.bashrc",
+            "",
+            "# Navigate to working directory",
+            f"cd {working_dir}",
+            "pwd",
+            "WD=`pwd`",
+            "",
+            "# Setup logging",
+            "mkdir -p $WD/log",
+            "TIME=`date +%m%d_%H%M`",
+            f'exec > >(tee -a $WD/log/{job_name}_$TIME.log $WD/log/{job_name}_$TIME.out) 2> >(tee -a $WD/log/{job_name}_$TIME.err $WD/log/{job_name}_$TIME.out >&2)',
+            ""
+        ])
+        
+        # Add environment activation if specified
+        if env_name:
+            script_lines.extend([
+                "# Activate conda/micromamba environment",
+                f"#micromamba activate {env_name}",
+                ""
+            ])
+        
+        # Add actual commands
+        script_lines.extend([
+            "# Execute commands",
+            "echo 'Starting job execution...'",
+            "echo 'Job: {}'".format(job_name),
+            "echo 'Date: '`date`",
+            ""
+        ])
+        
+        script_lines.extend(commands)
+        
+        # Add completion message
+        script_lines.extend([
+            "",
+            "echo 'Job completed at: '`date`"
+        ])
+        
+        return "\n".join(script_lines)
+    
+    def write_pbs_script(self, script_content: str, script_path: Path) -> Path:
+        """Write PBS script to file"""
+        script_path.write_text(script_content)
+        script_path.chmod(0o755)  # Make executable
+        logger.info(f"PBS script written to: {script_path}")
+        return script_path
+    
+    def submit_job(self, script_path: Path, dry_run: bool = False) -> Optional[str]:
+        """
+        Submit PBS job
+        
+        Args:
+            script_path: Path to PBS script
+            dry_run: If True, don't actually submit, just show what would be done
+            
+        Returns:
+            Job ID if submitted, None if dry run or submission failed
+        """
+        if dry_run:
+            logger.info(f"[DRY RUN] Would submit job: qsub {script_path}")
+            return None
+        
+        try:
+            result = subprocess.run(['qsub', str(script_path)],
+                                  capture_output=True, text=True, check=True)
+            job_id = result.stdout.strip()
+            logger.info(f"Job submitted successfully: {job_id}")
+            return job_id
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to submit job: {e.stderr}")
+            return None
+        except FileNotFoundError:
+            logger.error("qsub command not found. PBS/Torque may not be installed.")
+            return None
 
 
 class EnvironmentManager:
@@ -173,7 +297,10 @@ class GenomeQC:
     
     def __init__(self, genome_fasta: str, output_dir: str, threads: int,
                  busco_dbs: List[str], reference_genome: Optional[str] = None,
-                 organism_type: str = 'plant', min_telomere_length: int = 50):
+                 organism_type: str = 'plant', min_telomere_length: int = 50,
+                 cluster_mode: bool = False, pbs_queue: str = 'high',
+                 pbs_nodes: int = 1, pbs_ppn: int = 60, 
+                 pbs_walltime: str = '240:00:00', dry_run: bool = False):
         self.genome_fasta = Path(genome_fasta).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.threads = threads
@@ -182,8 +309,23 @@ class GenomeQC:
         self.organism_type = organism_type
         self.min_telomere_length = min_telomere_length
         
+        # Cluster mode settings
+        self.cluster_mode = cluster_mode
+        self.dry_run = dry_run
+        
         self.env_manager = EnvironmentManager()
         self.results = {}
+        
+        # Initialize PBS job manager if in cluster mode
+        if cluster_mode:
+            self.pbs_manager = PBSJobManager(
+                queue=pbs_queue,
+                nodes=pbs_nodes,
+                ppn=pbs_ppn,
+                walltime=pbs_walltime,
+                job_prefix='genomeQC'
+            )
+            self.job_dependencies = {}  # Track job dependencies
         
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -228,12 +370,83 @@ class GenomeQC:
         except FileNotFoundError:
             return False
     
+    def _create_and_submit_job(self, job_name: str, commands: List[str],
+                               working_dir: Path, env_name: Optional[str] = None,
+                               dependencies: Optional[List[str]] = None) -> Optional[str]:
+        """
+        Create PBS script and submit job (or save script in dry run mode)
+        
+        Args:
+            job_name: Name of the job
+            commands: List of commands to execute
+            working_dir: Working directory for the job
+            env_name: Optional environment name
+            dependencies: Optional list of job IDs this job depends on
+            
+        Returns:
+            Job ID if submitted, None otherwise
+        """
+        if not self.cluster_mode:
+            return None
+        
+        # Create PBS scripts directory
+        pbs_dir = self.output_dir / "pbs_scripts"
+        pbs_dir.mkdir(exist_ok=True)
+        
+        # Generate script content
+        script_content = self.pbs_manager.generate_pbs_script(
+            job_name=job_name,
+            commands=commands,
+            working_dir=str(working_dir),
+            env_name=env_name,
+            dependencies=dependencies
+        )
+        
+        # Write script to file
+        script_path = pbs_dir / f"{job_name}.pbs"
+        self.pbs_manager.write_pbs_script(script_content, script_path)
+        
+        # Submit job (or log in dry run mode)
+        job_id = self.pbs_manager.submit_job(script_path, dry_run=self.dry_run)
+        
+        if job_id:
+            self.pbs_manager.submitted_jobs[job_name] = job_id
+            
+        return job_id
+    
     def run_telomere_gap_analysis(self):
         """Run telomere and gap analysis using quartet or seqkit"""
         logger.info("=" * 60)
         logger.info("Running telomere and gap analysis")
         logger.info("=" * 60)
         
+        if self.cluster_mode:
+            # Generate PBS job for telomere/gap analysis
+            genome_prefix = self.genome_fasta.stem
+            
+            if self.check_quartet_available():
+                commands = [
+                    f"quartet.py TeloExplorer -i {self.genome_fasta} -c {self.organism_type} -m {self.min_telomere_length} -p {genome_prefix}"
+                ]
+            else:
+                commands = [
+                    f"micromamba run -n seqkit seqkit stats -a -T {self.genome_fasta} > seqkit_stats.tsv",
+                    f"micromamba run -n seqkit seqkit fx2tab -n -g {self.genome_fasta} > gap_content.tsv"
+                ]
+            
+            job_id = self._create_and_submit_job(
+                job_name="TELOMERE_GAP",
+                commands=commands,
+                working_dir=self.telomere_dir
+            )
+            
+            if job_id:
+                self.job_dependencies['telomere_gap'] = job_id
+                
+            logger.info(f"Telomere/gap analysis job created: {job_id or 'dry-run'}")
+            return
+        
+        # Original direct execution mode
         if self.check_quartet_available():
             logger.info("Using quartet for telomere and gap analysis")
             self._run_quartet()
@@ -337,6 +550,56 @@ class GenomeQC:
         logger.info("Running BUSCO analysis")
         logger.info("=" * 60)
         
+        if self.cluster_mode:
+            # In cluster mode, create a separate job for each BUSCO database
+            self.results['busco'] = {}
+            
+            for db in self.busco_dbs:
+                db_path = Path(db)
+                is_local = db_path.exists()
+                
+                if is_local:
+                    db_name = db_path.name
+                    lineage_name = db_name
+                else:
+                    db_name = db
+                    lineage_name = db
+                
+                output_name = f"busco_{db_name}"
+                
+                # Build command
+                cmd_parts = [
+                    'micromamba run -n busco busco',
+                    f'-i {self.genome_fasta}',
+                    f'-o {output_name}',
+                    '-m genome',
+                    f'-c {self.threads}',
+                    f'-l {lineage_name}'
+                ]
+                
+                if is_local:
+                    cmd_parts.append(f'--download_path {db_path.parent}')
+                    cmd_parts.append('--offline')
+                elif db in ['auto', 'auto-lineage']:
+                    cmd_parts.append('--auto-lineage')
+                
+                commands = [' '.join(cmd_parts)]
+                
+                job_id = self._create_and_submit_job(
+                    job_name=f"BUSCO_{db_name}",
+                    commands=commands,
+                    working_dir=self.busco_dir,
+                    env_name='busco'
+                )
+                
+                if job_id:
+                    self.job_dependencies[f'busco_{db_name}'] = job_id
+                
+                logger.info(f"BUSCO job for {db_name} created: {job_id or 'dry-run'}")
+            
+            return
+        
+        # Original direct execution mode
         busco_env = self.env_manager.setup_software('busco',
                                                      channels=['bioconda', 'conda-forge'])
         
@@ -437,6 +700,56 @@ class GenomeQC:
         logger.info("Running LTR analysis pipeline")
         logger.info("=" * 60)
         
+        genome_name = self.genome_fasta.name
+        genome_stem = self.genome_fasta.stem
+        
+        if self.cluster_mode:
+            # Create a single job for the entire LTR analysis pipeline
+            index_prefix = self.ltr_dir / genome_stem
+            harvest_scn = self.ltr_dir / f"{genome_stem}.harvest.scn"
+            raw_ltr_scn = self.ltr_dir / f"{genome_name}.rawLTR.scn"
+            pass_list = self.ltr_dir / f"{genome_name}.pass.list"
+            out_file = self.ltr_dir / f"{genome_name}.out"
+            
+            commands = [
+                "# Step 1: Create genome index",
+                f"micromamba run -n genometools gt suffixerator -db {self.genome_fasta} -indexname {index_prefix} -tis -suf -lcp -des -ssp -sds -dna",
+                "",
+                "# Step 2: Run ltrharvest",
+                f"micromamba run -n genometools gt -j {self.threads} ltrharvest -index {index_prefix} -minlenltr 100 -maxlenltr 7000 -mintsd 4 -maxtsd 6 -motif TGCA -motifmis 1 -similar 85 -vic 10 -seed 20 -seqids yes > {harvest_scn}",
+                "",
+                "# Step 3: Run LTR_FINDER_parallel (if available)",
+                f"micromamba run -n ltr_finder LTR_FINDER_parallel -seq {self.genome_fasta} -threads {self.threads} -harvest_out -size 1000000 || echo 'LTR_FINDER_parallel not available or failed'",
+                "",
+                "# Step 4: Combine harvest and finder results",
+                f"cat {harvest_scn} > {raw_ltr_scn}",
+                f"if [ -f {genome_name}.finder.combine.scn ]; then cat {genome_name}.finder.combine.scn >> {raw_ltr_scn}; fi",
+                f"if [ -f {genome_stem}.finder.combine.scn ]; then cat {genome_stem}.finder.combine.scn >> {raw_ltr_scn}; fi",
+                "",
+                "# Step 5: Run LTR_retriever",
+                f"micromamba run -n ltr_retriever LTR_retriever -genome {self.genome_fasta} -inharvest {raw_ltr_scn} -threads {self.threads}",
+                "",
+                "# Step 6: Calculate LAI (if LAI software available)",
+                f"if command -v LAI &> /dev/null; then",
+                f"  LAI -genome {self.genome_fasta} -intact {pass_list} -all {out_file} -t {self.threads} || echo 'LAI calculation failed'",
+                f"else",
+                f"  echo 'LAI software not available'",
+                f"fi"
+            ]
+            
+            job_id = self._create_and_submit_job(
+                job_name="LTR_ANALYSIS",
+                commands=commands,
+                working_dir=self.ltr_dir
+            )
+            
+            if job_id:
+                self.job_dependencies['ltr_analysis'] = job_id
+            
+            logger.info(f"LTR analysis job created: {job_id or 'dry-run'}")
+            return
+        
+        # Original direct execution mode
         # Setup environments
         genometools_env = self.env_manager.setup_software('genometools', 
                                                           channels=['bioconda', 'conda-forge'])
@@ -446,8 +759,6 @@ class GenomeQC:
                                                          channels=['bioconda', 'conda-forge'])
         
         try:
-            genome_name = self.genome_fasta.name
-            genome_stem = self.genome_fasta.stem
             
             # Step 1: Create genome index for genometools
             logger.info("Creating genome index with gt suffixerator...")
@@ -631,6 +942,37 @@ class GenomeQC:
         logger.info("Running QUAST for assembly statistics")
         logger.info("=" * 60)
         
+        if self.cluster_mode:
+            # Create job for QUAST analysis
+            cmd_parts = [
+                'micromamba run -n quast quast.py',
+                str(self.genome_fasta),
+                f'-o {self.quast_dir}',
+                f'-t {self.threads}',
+                '--min-contig 0',
+                '--plots-format png',
+                '--large'
+            ]
+            
+            if self.reference_genome and self.reference_genome.exists():
+                cmd_parts.append(f'-r {self.reference_genome}')
+            
+            commands = [' '.join(cmd_parts)]
+            
+            job_id = self._create_and_submit_job(
+                job_name="QUAST",
+                commands=commands,
+                working_dir=self.quast_dir,
+                env_name='quast'
+            )
+            
+            if job_id:
+                self.job_dependencies['quast'] = job_id
+            
+            logger.info(f"QUAST job created: {job_id or 'dry-run'}")
+            return
+        
+        # Original direct execution mode
         quast_env = self.env_manager.setup_software('quast',
                                                      channels=['bioconda', 'conda-forge'])
         
@@ -704,6 +1046,25 @@ class GenomeQC:
             }
             return
         
+        if self.cluster_mode:
+            # Create job for synteny analysis
+            commands = [
+                f"GenomeSyn -g1 {self.reference_genome} -g2 {self.genome_fasta} -o {self.synteny_dir} -t {self.threads}"
+            ]
+            
+            job_id = self._create_and_submit_job(
+                job_name="SYNTENY",
+                commands=commands,
+                working_dir=self.synteny_dir
+            )
+            
+            if job_id:
+                self.job_dependencies['synteny'] = job_id
+            
+            logger.info(f"Synteny analysis job created: {job_id or 'dry-run'}")
+            return
+        
+        # Original direct execution mode
         try:
             cmd = [
                 'GenomeSyn',
@@ -827,6 +1188,14 @@ class GenomeQC:
         logger.info(f"Output: {self.output_dir}")
         logger.info(f"Threads: {self.threads}")
         
+        if self.cluster_mode:
+            logger.info(f"Cluster Mode: ENABLED")
+            logger.info(f"PBS Queue: {self.pbs_manager.queue}")
+            logger.info(f"PBS Resources: nodes={self.pbs_manager.nodes}:ppn={self.pbs_manager.ppn}")
+            logger.info(f"PBS Walltime: {self.pbs_manager.walltime}")
+            if self.dry_run:
+                logger.info("DRY RUN MODE: Jobs will not be submitted")
+        
         try:
             # Run all analyses
             self.run_telomere_gap_analysis()
@@ -836,11 +1205,16 @@ class GenomeQC:
             self.run_quast()
             self.run_synteny_analysis()
             
-            # Generate summary
-            self.generate_summary()
+            # Generate summary only in direct execution mode
+            if not self.cluster_mode:
+                self.generate_summary()
             
             logger.info("=" * 60)
-            logger.info("Pipeline completed successfully!")
+            if self.cluster_mode:
+                logger.info("Pipeline job scripts generated successfully!")
+                logger.info("Jobs have been submitted to the PBS queue" if not self.dry_run else "Jobs NOT submitted (dry run mode)")
+            else:
+                logger.info("Pipeline completed successfully!")
             logger.info("=" * 60)
             
         except Exception as e:
@@ -854,9 +1228,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
+  # Direct execution mode
   %(prog)s -g genome.fasta -o results -t 16 -b eukaryota_odb10 bacteria_odb10
   %(prog)s -g genome.fasta -o results -t 16 -b /path/to/local/busco_db -r reference.fasta -c plant
   %(prog)s -g genome.fasta -o results -t 16 -b eukaryota_odb10 -c plant -m 50
+  
+  # Cluster mode (PBS/Torque)
+  %(prog)s -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --pbs-queue high --pbs-ppn 60
+  %(prog)s -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --dry-run
         """
     )
     
@@ -877,6 +1256,20 @@ Example usage:
                        type=int, default=50,
                        help='Minimum telomere length for quartet analysis (default: 50)')
     
+    # Cluster mode arguments
+    parser.add_argument('--cluster', action='store_true',
+                       help='Enable cluster mode - generate PBS job scripts instead of running directly')
+    parser.add_argument('--pbs-queue', dest='pbs_queue', default='high',
+                       help='PBS queue name (default: high)')
+    parser.add_argument('--pbs-nodes', dest='pbs_nodes', type=int, default=1,
+                       help='Number of nodes for PBS jobs (default: 1)')
+    parser.add_argument('--pbs-ppn', dest='pbs_ppn', type=int, default=60,
+                       help='Processors per node for PBS jobs (default: 60)')
+    parser.add_argument('--pbs-walltime', dest='pbs_walltime', default='240:00:00',
+                       help='Walltime for PBS jobs (default: 240:00:00)')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Generate PBS scripts but do not submit jobs')
+    
     args = parser.parse_args()
     
     # Validate inputs
@@ -896,10 +1289,30 @@ Example usage:
         busco_dbs=args.busco,
         reference_genome=args.reference,
         organism_type=args.organism_type,
-        min_telomere_length=args.min_telomere_length
+        min_telomere_length=args.min_telomere_length,
+        cluster_mode=args.cluster,
+        pbs_queue=args.pbs_queue,
+        pbs_nodes=args.pbs_nodes,
+        pbs_ppn=args.pbs_ppn,
+        pbs_walltime=args.pbs_walltime,
+        dry_run=args.dry_run
     )
     
     pipeline.run_pipeline()
+    
+    # In cluster mode, print summary of submitted jobs
+    if args.cluster:
+        logger.info("=" * 60)
+        logger.info("CLUSTER MODE SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"PBS scripts generated in: {pipeline.output_dir}/pbs_scripts/")
+        if args.dry_run:
+            logger.info("DRY RUN MODE - No jobs were submitted")
+        else:
+            logger.info("Submitted jobs:")
+            for job_name, job_id in pipeline.pbs_manager.submitted_jobs.items():
+                logger.info(f"  {job_name}: {job_id}")
+        logger.info("=" * 60)
 
 
 if __name__ == '__main__':
