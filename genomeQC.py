@@ -203,6 +203,16 @@ class GenomeQC:
     def check_quartet_available(self) -> bool:
         """Check if quartet is available in the system"""
         try:
+            # Try quartet.py first (the actual command we use)
+            result = subprocess.run(['quartet.py', '--help'], 
+                                  capture_output=True)
+            if result.returncode == 0:
+                return True
+        except FileNotFoundError:
+            pass
+        
+        try:
+            # Fallback to checking for 'quartet' command
             result = subprocess.run(['quartet', '--help'], 
                                   capture_output=True)
             return result.returncode == 0
@@ -490,7 +500,15 @@ class GenomeQC:
             
             # Step 3: Run LTR_FINDER_parallel (if available)
             logger.info("Running LTR_FINDER_parallel...")
-            finder_scn = self.ltr_dir / f"{genome_stem}.finder.combine.scn"
+            
+            # LTR_FINDER_parallel typically outputs to {genome_name}.finder.combine.scn
+            # But we need to check for various possible output filenames
+            finder_scn = None
+            possible_finder_files = [
+                self.ltr_dir / f"{genome_name}.finder.combine.scn",
+                self.ltr_dir / f"{genome_stem}.finder.combine.scn",
+                self.ltr_dir / f"{genome_name}.finder.scn"
+            ]
             
             # Check if LTR_FINDER_parallel is available
             try:
@@ -506,21 +524,47 @@ class GenomeQC:
                 
                 if result.returncode == 0:
                     logger.info("LTR_FINDER_parallel completed")
+                    # Find which output file was actually created
+                    for possible_file in possible_finder_files:
+                        if possible_file.exists():
+                            finder_scn = possible_file
+                            logger.info(f"Found LTR_FINDER output: {finder_scn}")
+                            break
                 else:
                     logger.warning(f"LTR_FINDER_parallel warning: {result.stderr}")
             except Exception as e:
                 logger.warning(f"LTR_FINDER_parallel not available or failed: {e}")
-                # Create empty finder file if not available
-                finder_scn.write_text("")
             
             # Step 4: Combine harvest and finder results
             logger.info("Combining LTR results...")
             raw_ltr_scn = self.ltr_dir / f"{genome_name}.rawLTR.scn"
             
-            # Combine the two .scn files
-            harvest_content = harvest_scn.read_text() if harvest_scn.exists() else ""
-            finder_content = finder_scn.read_text() if finder_scn.exists() else ""
-            raw_ltr_scn.write_text(harvest_content + finder_content)
+            # Combine the two .scn files carefully
+            # Read harvest content
+            harvest_content = ""
+            if harvest_scn.exists():
+                harvest_content = harvest_scn.read_text()
+            
+            # Read finder content if available
+            finder_content = ""
+            if finder_scn and finder_scn.exists():
+                finder_content = finder_scn.read_text()
+            
+            # Combine contents
+            # If both files exist, combine them; otherwise use whichever is available
+            if harvest_content and finder_content:
+                # Simple concatenation is acceptable for .scn format
+                # as LTR_retriever will handle deduplication and validation
+                combined_content = harvest_content.rstrip() + "\n" + finder_content
+            elif harvest_content:
+                combined_content = harvest_content
+            elif finder_content:
+                combined_content = finder_content
+            else:
+                logger.warning("No LTR results found from either ltrharvest or LTR_FINDER")
+                combined_content = ""
+            
+            raw_ltr_scn.write_text(combined_content)
             logger.info(f"Combined LTR results saved to {raw_ltr_scn}")
             
             # Step 5: Run LTR_retriever
@@ -568,7 +612,7 @@ class GenomeQC:
             self.results['ltr_analysis'] = {
                 'status': 'completed',
                 'ltrharvest_output': str(harvest_scn),
-                'ltr_finder_output': str(finder_scn) if finder_scn.exists() else 'not available',
+                'ltr_finder_output': str(finder_scn) if finder_scn and finder_scn.exists() else 'not available',
                 'combined_ltr': str(raw_ltr_scn),
                 'ltr_retriever_dir': str(self.ltr_dir),
                 'lai_status': 'attempted'
