@@ -1,0 +1,10 @@
+# Python requirements for genomeQC
+# Note: Bioinformatics tools are managed by micromamba/conda
+
+# Core Python dependencies (minimal - using Python standard library mostly)
+# No additional Python packages required for basic functionality
+
+# Optional: For enhanced functionality
+# pandas>=1.0.0  # For advanced data processing
+# matplotlib>=3.0.0  # For custom plotting
+# biopython>=1.70  # For sequence manipulation
