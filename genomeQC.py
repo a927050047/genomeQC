@@ -303,7 +303,8 @@ class GenomeQC:
                  organism_type: str = 'plant', min_telomere_length: int = 50,
                  cluster_mode: bool = False, pbs_queue: str = 'high',
                  pbs_nodes: int = 1, pbs_ppn: int = 60, 
-                 pbs_walltime: str = '240:00:00', dry_run: bool = False):
+                 pbs_walltime: str = '240:00:00', dry_run: bool = False,
+                 reads: Optional[List[str]] = None):
         self.genome_fasta = Path(genome_fasta).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.threads = threads
@@ -311,6 +312,7 @@ class GenomeQC:
         self.reference_genome = Path(reference_genome).resolve() if reference_genome else None
         self.organism_type = organism_type
         self.min_telomere_length = min_telomere_length
+        self.reads = [Path(r).resolve() for r in reads] if reads else None
         
         # Cluster mode settings
         self.cluster_mode = cluster_mode
@@ -340,9 +342,10 @@ class GenomeQC:
         self.ltr_dir = self.output_dir / "ltr_analysis"
         self.quast_dir = self.output_dir / "quast"
         self.synteny_dir = self.output_dir / "synteny"
+        self.coverage_dir = self.output_dir / "coverage"
         
         for d in [self.telomere_dir, self.busco_dir, self.merqury_dir,
-                  self.ltr_dir, self.quast_dir, self.synteny_dir]:
+                  self.ltr_dir, self.quast_dir, self.synteny_dir, self.coverage_dir]:
             d.mkdir(exist_ok=True)
     
     def check_quartet_available(self) -> bool:
@@ -676,23 +679,301 @@ class GenomeQC:
         logger.info("Running Merqury for QV calculation")
         logger.info("=" * 60)
         
-        merqury_env = self.env_manager.setup_software('merqury',
-                                                       channels=['bioconda', 'conda-forge'])
-        
-        try:
-            # Note: Merqury requires k-mer database (meryl)
-            # For a complete implementation, we need reads
-            # Here we'll document the limitation
-            logger.warning("Merqury requires k-mer database from reads")
+        if not self.reads:
+            logger.warning("No sequencing reads provided")
             logger.warning("Skipping Merqury - requires raw sequencing reads for k-mer counting")
-            
             self.results['merqury'] = {
                 'status': 'skipped',
                 'note': 'Requires raw sequencing reads for k-mer database generation'
             }
+            return
+        
+        if self.cluster_mode:
+            # Generate PBS job for Merqury analysis
+            genome_name = self.genome_fasta.stem
+            meryl_db = self.merqury_dir / f"{genome_name}_reads.meryl"
+            
+            # Build meryl k-mer counting and merqury commands
+            reads_str = ' '.join(str(r) for r in self.reads)
+            commands = [
+                "# Step 1: Count k-mers with meryl",
+                f"micromamba run -n merqury meryl k=21 count output {meryl_db} {reads_str}",
+                "",
+                "# Step 2: Run merqury",
+                f"micromamba run -n merqury merqury.sh {meryl_db} {self.genome_fasta} {genome_name}"
+            ]
+            
+            job_id = self._create_and_submit_job(
+                job_name="MERQURY",
+                commands=commands,
+                working_dir=self.merqury_dir,
+                env_name='merqury'
+            )
+            
+            if job_id:
+                self.job_dependencies['merqury'] = job_id
+            
+            logger.info(f"Merqury job created: {job_id or 'dry-run'}")
+            return
+        
+        # Original direct execution mode
+        merqury_env = self.env_manager.setup_software('merqury',
+                                                       channels=['bioconda', 'conda-forge'])
+        
+        try:
+            genome_name = self.genome_fasta.stem
+            meryl_db = self.merqury_dir / f"{genome_name}_reads.meryl"
+            
+            # Step 1: Count k-mers with meryl
+            logger.info("Counting k-mers with meryl...")
+            cmd_meryl = ['meryl', 'k=21', 'count', 'output', str(meryl_db)]
+            cmd_meryl.extend([str(r) for r in self.reads])
+            
+            result = self.env_manager.run_command(
+                merqury_env, cmd_meryl,
+                cwd=str(self.merqury_dir),
+                capture_output=True, text=True
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"meryl failed: {result.stderr}")
+                self.results['merqury'] = {
+                    'status': 'failed',
+                    'error': f'meryl k-mer counting failed: {result.stderr}'
+                }
+                return
+            
+            logger.info(f"K-mer database created: {meryl_db}")
+            
+            # Step 2: Run merqury
+            logger.info("Running merqury...")
+            cmd_merqury = ['merqury.sh', str(meryl_db), str(self.genome_fasta), genome_name]
+            
+            result = self.env_manager.run_command(
+                merqury_env, cmd_merqury,
+                cwd=str(self.merqury_dir),
+                capture_output=True, text=True
+            )
+            
+            if result.returncode == 0:
+                logger.info("Merqury completed successfully")
+                
+                # Check for output files
+                qv_file = self.merqury_dir / f"{genome_name}.qv"
+                completeness_file = self.merqury_dir / f"{genome_name}.completeness.stats"
+                
+                self.results['merqury'] = {
+                    'status': 'success',
+                    'output_dir': str(self.merqury_dir),
+                    'meryl_db': str(meryl_db),
+                    'qv_file': str(qv_file) if qv_file.exists() else 'not found',
+                    'completeness_file': str(completeness_file) if completeness_file.exists() else 'not found'
+                }
+                
+                # Log QV if available
+                if qv_file.exists():
+                    logger.info(f"QV results: {qv_file.read_text()}")
+            else:
+                logger.error(f"Merqury failed: {result.stderr}")
+                self.results['merqury'] = {
+                    'status': 'failed',
+                    'error': result.stderr
+                }
         except Exception as e:
-            logger.error(f"Error in Merqury setup: {e}")
+            logger.error(f"Error running Merqury: {e}")
             self.results['merqury'] = {
+                'status': 'error',
+                'error': str(e)
+            }
+    
+    def run_coverage_analysis(self):
+        """Run coverage analysis using minimap2 and mosdepth"""
+        logger.info("=" * 60)
+        logger.info("Running coverage analysis with minimap2 and mosdepth")
+        logger.info("=" * 60)
+        
+        if not self.reads:
+            logger.warning("No sequencing reads provided")
+            logger.warning("Skipping coverage analysis - requires raw sequencing reads")
+            self.results['coverage'] = {
+                'status': 'skipped',
+                'note': 'Requires raw sequencing reads for alignment'
+            }
+            return
+        
+        if self.cluster_mode:
+            # Generate PBS job for coverage analysis
+            genome_name = self.genome_fasta.stem
+            sam_file = self.coverage_dir / f"{genome_name}.sam"
+            bam_file = self.coverage_dir / f"{genome_name}.bam"
+            sorted_bam = self.coverage_dir / f"{genome_name}.sorted.bam"
+            
+            # Build alignment and coverage commands
+            reads_str = ' '.join(str(r) for r in self.reads)
+            commands = [
+                "# Step 1: Align reads to assembly with minimap2",
+                f"micromamba run -n minimap2 minimap2 -ax map-ont -t {self.threads} {self.genome_fasta} {reads_str} > {sam_file}",
+                "",
+                "# Step 2: Convert SAM to BAM and sort",
+                f"micromamba run -n samtools samtools view -@ {self.threads} -b {sam_file} | samtools sort -@ {self.threads} -o {sorted_bam}",
+                "",
+                "# Step 3: Index BAM file",
+                f"micromamba run -n samtools samtools index {sorted_bam}",
+                "",
+                "# Step 4: Calculate coverage with mosdepth",
+                f"micromamba run -n mosdepth mosdepth -t {self.threads} {genome_name} {sorted_bam}",
+                "",
+                "# Clean up intermediate SAM file to save space",
+                f"rm -f {sam_file}"
+            ]
+            
+            job_id = self._create_and_submit_job(
+                job_name="COVERAGE",
+                commands=commands,
+                working_dir=self.coverage_dir,
+                env_name='minimap2'
+            )
+            
+            if job_id:
+                self.job_dependencies['coverage'] = job_id
+            
+            logger.info(f"Coverage analysis job created: {job_id or 'dry-run'}")
+            return
+        
+        # Original direct execution mode
+        minimap2_env = self.env_manager.setup_software('minimap2',
+                                                        channels=['bioconda', 'conda-forge'])
+        samtools_env = self.env_manager.setup_software('samtools',
+                                                        channels=['bioconda', 'conda-forge'])
+        mosdepth_env = self.env_manager.setup_software('mosdepth',
+                                                        channels=['bioconda', 'conda-forge'])
+        
+        try:
+            genome_name = self.genome_fasta.stem
+            sam_file = self.coverage_dir / f"{genome_name}.sam"
+            bam_file = self.coverage_dir / f"{genome_name}.bam"
+            sorted_bam = self.coverage_dir / f"{genome_name}.sorted.bam"
+            
+            # Step 1: Align reads with minimap2
+            logger.info("Aligning reads with minimap2...")
+            cmd_minimap2 = ['minimap2', '-ax', 'map-ont', '-t', str(self.threads),
+                           str(self.genome_fasta)]
+            cmd_minimap2.extend([str(r) for r in self.reads])
+            
+            with open(sam_file, 'w') as sam_out:
+                result = self.env_manager.run_command(
+                    minimap2_env, cmd_minimap2,
+                    stdout=sam_out, stderr=subprocess.PIPE, text=True
+                )
+            
+            if result.returncode != 0:
+                logger.error(f"minimap2 failed: {result.stderr}")
+                self.results['coverage'] = {
+                    'status': 'failed',
+                    'error': f'minimap2 alignment failed: {result.stderr}'
+                }
+                return
+            
+            logger.info(f"Alignment completed: {sam_file}")
+            
+            # Step 2: Convert SAM to BAM and sort
+            logger.info("Converting and sorting BAM file...")
+            cmd_view = ['samtools', 'view', '-@', str(self.threads), '-b', str(sam_file)]
+            cmd_sort = ['samtools', 'sort', '-@', str(self.threads), '-o', str(sorted_bam)]
+            
+            # Pipe view output to sort input
+            view_result = self.env_manager.run_command(
+                samtools_env, cmd_view,
+                capture_output=True
+            )
+            
+            if view_result.returncode != 0:
+                logger.error(f"samtools view failed: {view_result.stderr}")
+                self.results['coverage'] = {
+                    'status': 'failed',
+                    'error': 'samtools view failed'
+                }
+                return
+            
+            sort_result = self.env_manager.run_command(
+                samtools_env, cmd_sort,
+                input=view_result.stdout,
+                capture_output=True
+            )
+            
+            if sort_result.returncode != 0:
+                logger.error(f"samtools sort failed: {sort_result.stderr}")
+                self.results['coverage'] = {
+                    'status': 'failed',
+                    'error': 'samtools sort failed'
+                }
+                return
+            
+            logger.info(f"BAM file sorted: {sorted_bam}")
+            
+            # Step 3: Index BAM file
+            logger.info("Indexing BAM file...")
+            cmd_index = ['samtools', 'index', str(sorted_bam)]
+            
+            result = self.env_manager.run_command(
+                samtools_env, cmd_index,
+                capture_output=True, text=True
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"samtools index failed: {result.stderr}")
+                self.results['coverage'] = {
+                    'status': 'failed',
+                    'error': 'samtools index failed'
+                }
+                return
+            
+            logger.info("BAM file indexed")
+            
+            # Step 4: Run mosdepth
+            logger.info("Running mosdepth for coverage analysis...")
+            cmd_mosdepth = ['mosdepth', '-t', str(self.threads),
+                           genome_name, str(sorted_bam)]
+            
+            result = self.env_manager.run_command(
+                mosdepth_env, cmd_mosdepth,
+                cwd=str(self.coverage_dir),
+                capture_output=True, text=True
+            )
+            
+            if result.returncode == 0:
+                logger.info("Mosdepth completed successfully")
+                
+                # Clean up intermediate SAM file to save space
+                if sam_file.exists():
+                    sam_file.unlink()
+                    logger.info(f"Removed intermediate SAM file: {sam_file}")
+                
+                # Check for output files
+                summary_file = self.coverage_dir / f"{genome_name}.mosdepth.summary.txt"
+                global_dist = self.coverage_dir / f"{genome_name}.mosdepth.global.dist.txt"
+                
+                self.results['coverage'] = {
+                    'status': 'success',
+                    'output_dir': str(self.coverage_dir),
+                    'bam_file': str(sorted_bam),
+                    'summary_file': str(summary_file) if summary_file.exists() else 'not found',
+                    'global_dist_file': str(global_dist) if global_dist.exists() else 'not found'
+                }
+                
+                # Log coverage summary if available
+                if summary_file.exists():
+                    logger.info("Coverage Summary:")
+                    logger.info(summary_file.read_text())
+            else:
+                logger.error(f"mosdepth failed: {result.stderr}")
+                self.results['coverage'] = {
+                    'status': 'failed',
+                    'error': result.stderr
+                }
+        except Exception as e:
+            logger.error(f"Error running coverage analysis: {e}")
+            self.results['coverage'] = {
                 'status': 'error',
                 'error': str(e)
             }
@@ -1174,6 +1455,14 @@ class GenomeQC:
                 lines.append(f"  {key}: {value}")
         lines.append("")
         
+        # Coverage Analysis
+        lines.append("COVERAGE ANALYSIS (MOSDEPTH)")
+        lines.append("-" * 80)
+        if 'coverage' in self.results:
+            for key, value in self.results['coverage'].items():
+                lines.append(f"  {key}: {value}")
+        lines.append("")
+        
         lines.append("=" * 80)
         lines.append("END OF REPORT")
         lines.append("=" * 80)
@@ -1204,6 +1493,7 @@ class GenomeQC:
             self.run_telomere_gap_analysis()
             self.run_busco()
             self.run_merqury()
+            self.run_coverage_analysis()
             self.run_ltr_analysis()
             self.run_quast()
             self.run_synteny_analysis()
@@ -1236,9 +1526,13 @@ Example usage:
   %(prog)s -g genome.fasta -o results -t 16 -b /path/to/local/busco_db -r reference.fasta -c plant
   %(prog)s -g genome.fasta -o results -t 16 -b eukaryota_odb10 -c plant -m 50
   
+  # With sequencing reads for Merqury and coverage analysis
+  %(prog)s -g genome.fasta -o results -t 16 -b eukaryota_odb10 --reads reads1.fastq.gz reads2.fastq.gz
+  
   # Cluster mode (PBS/Torque)
   %(prog)s -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --pbs-queue high --pbs-ppn 60
   %(prog)s -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --dry-run
+  %(prog)s -g genome.fasta -o results -t 60 -b eukaryota_odb10 --reads reads.fastq.gz --cluster
         """
     )
     
@@ -1258,6 +1552,8 @@ Example usage:
     parser.add_argument('-m', '--min-telomere-length', dest='min_telomere_length',
                        type=int, default=50,
                        help='Minimum telomere length for quartet analysis (default: 50)')
+    parser.add_argument('--reads', nargs='+', default=None,
+                       help='Sequencing reads (FASTQ/FASTA) for Merqury QV calculation and coverage analysis (optional)')
     
     # Cluster mode arguments
     parser.add_argument('--cluster', action='store_true',
@@ -1284,6 +1580,12 @@ Example usage:
         logger.error(f"Reference genome file not found: {args.reference}")
         sys.exit(1)
     
+    if args.reads:
+        for reads_file in args.reads:
+            if not Path(reads_file).exists():
+                logger.error(f"Reads file not found: {reads_file}")
+                sys.exit(1)
+    
     # Create and run pipeline
     pipeline = GenomeQC(
         genome_fasta=args.genome,
@@ -1298,7 +1600,8 @@ Example usage:
         pbs_nodes=args.pbs_nodes,
         pbs_ppn=args.pbs_ppn,
         pbs_walltime=args.pbs_walltime,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        reads=args.reads
     )
     
     pipeline.run_pipeline()
