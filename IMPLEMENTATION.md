@@ -106,6 +106,35 @@ This document describes how the genomic QC pipeline implements all specified req
 - Comprehensive JSON and text summaries
 - Lines 548-651
 
+#### 5. Cluster Support (PBS/Torque)
+
+**Requirement**: Add cluster support, mainly Torque/PBS support, where each software or software group runs as a separate job with proper PBS directives and logging.
+
+**Implementation**:
+- `PBSJobManager` class handles PBS script generation and job submission
+- PBS script features:
+  - Standard PBS directives (#PBS -N, -q, -l nodes:ppn, -j oe, -l walltime)
+  - Source ~/.bashrc for environment setup
+  - Working directory navigation
+  - Automatic log directory creation
+  - Timestamped logging with both stdout and stderr capture
+  - Format: `exec > >(tee -a $WD/log/$TIME.log $WD/log/$TIME.out) 2> >(tee -a $WD/log/$TIME.err $WD/log/$TIME.out >&2)`
+- Separate PBS jobs for each pipeline component:
+  - `TELOMERE_GAP`: Telomere and gap analysis
+  - `BUSCO_<database>`: One job per BUSCO database
+  - `LTR_ANALYSIS`: Complete LTR pipeline (ltrharvest, LTR_FINDER, LTR_retriever, LAI)
+  - `QUAST`: Assembly statistics
+  - `SYNTENY`: Synteny analysis (if reference provided)
+- Command-line options:
+  - `--cluster`: Enable cluster mode
+  - `--pbs-queue`: Queue name (default: high)
+  - `--pbs-nodes`: Number of nodes (default: 1)
+  - `--pbs-ppn`: Processors per node (default: 60)
+  - `--pbs-walltime`: Walltime (default: 240:00:00)
+  - `--dry-run`: Generate scripts without submitting
+- Job dependency tracking for future enhancements
+- Lines 32-145 (PBSJobManager), cluster mode logic in each analysis method
+
 ---
 
 ## 中文
@@ -212,6 +241,35 @@ This document describes how the genomic QC pipeline implements all specified req
 - 全面的JSON和文本摘要
 - 第548-651行
 
+#### 5. 集群支持 (PBS/Torque)
+
+**需求**: 添加集群支持，主要是Torque/PBS支持，每个软件或软件组单独运行一个任务，包含适当的PBS指令和日志记录。
+
+**实现**:
+- `PBSJobManager` 类处理PBS脚本生成和作业提交
+- PBS脚本特性:
+  - 标准PBS指令 (#PBS -N, -q, -l nodes:ppn, -j oe, -l walltime)
+  - Source ~/.bashrc 用于环境设置
+  - 工作目录导航
+  - 自动创建日志目录
+  - 带时间戳的日志记录，同时捕获stdout和stderr
+  - 格式: `exec > >(tee -a $WD/log/$TIME.log $WD/log/$TIME.out) 2> >(tee -a $WD/log/$TIME.err $WD/log/$TIME.out >&2)`
+- 每个流程组件单独的PBS作业:
+  - `TELOMERE_GAP`: 端粒和gap分析
+  - `BUSCO_<database>`: 每个BUSCO数据库一个作业
+  - `LTR_ANALYSIS`: 完整的LTR流程 (ltrharvest, LTR_FINDER, LTR_retriever, LAI)
+  - `QUAST`: 组装统计
+  - `SYNTENY`: 共线性分析（如果提供参考基因组）
+- 命令行选项:
+  - `--cluster`: 启用集群模式
+  - `--pbs-queue`: 队列名称（默认：high）
+  - `--pbs-nodes`: 节点数（默认：1）
+  - `--pbs-ppn`: 每节点处理器数（默认：60）
+  - `--pbs-walltime`: 运行时间限制（默认：240:00:00）
+  - `--dry-run`: 生成脚本但不提交
+- 作业依赖跟踪，用于未来增强
+- 第32-145行 (PBSJobManager)，每个分析方法中的集群模式逻辑
+
 ### 使用示例
 
 ```bash
@@ -229,6 +287,12 @@ python genomeQC.py -g genome.fasta -o results -t 20 -b embryophyta_odb10 -c plan
 
 # 包含参考基因组进行共线性分析
 python genomeQC.py -g genome.fasta -o results -t 32 -b eukaryota_odb10 -r reference.fasta -c plant -m 50
+
+# 集群模式 - 生成并提交PBS作业
+python genomeQC.py -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --pbs-queue high --pbs-ppn 60
+
+# 集群模式 - 仅生成脚本不提交（dry run）
+python genomeQC.py -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --dry-run
 ```
 
 ### 注意事项
