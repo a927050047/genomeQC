@@ -172,12 +172,15 @@ class GenomeQC:
     """Main genome QC pipeline"""
     
     def __init__(self, genome_fasta: str, output_dir: str, threads: int,
-                 busco_dbs: List[str], reference_genome: Optional[str] = None):
+                 busco_dbs: List[str], reference_genome: Optional[str] = None,
+                 organism_type: str = 'plant', min_telomere_length: int = 50):
         self.genome_fasta = Path(genome_fasta).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.threads = threads
         self.busco_dbs = busco_dbs
         self.reference_genome = Path(reference_genome).resolve() if reference_genome else None
+        self.organism_type = organism_type
+        self.min_telomere_length = min_telomere_length
         
         self.env_manager = EnvironmentManager()
         self.results = {}
@@ -200,6 +203,16 @@ class GenomeQC:
     def check_quartet_available(self) -> bool:
         """Check if quartet is available in the system"""
         try:
+            # Try quartet.py first (the actual command we use)
+            result = subprocess.run(['quartet.py', '--help'], 
+                                  capture_output=True)
+            if result.returncode == 0:
+                return True
+        except FileNotFoundError:
+            pass
+        
+        try:
+            # Fallback to checking for 'quartet' command
             result = subprocess.run(['quartet', '--help'], 
                                   capture_output=True)
             return result.returncode == 0
@@ -231,19 +244,30 @@ class GenomeQC:
     def _run_quartet(self):
         """Run quartet for telomere and gap analysis with visualization"""
         try:
-            # quartet identify telomeres
-            cmd = ['quartet', '-i', str(self.genome_fasta), 
-                   '-o', str(self.telomere_dir / 'quartet_output'),
-                   '-t', str(self.threads)]
+            # Get genome file name without extension for prefix
+            genome_prefix = self.genome_fasta.stem
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            # quartet TeloExplorer with proper parameters
+            # Command format: quartet.py TeloExplorer -i input.fa -c organism_type -m min_length -p prefix
+            cmd = ['quartet.py', 'TeloExplorer',
+                   '-i', str(self.genome_fasta),
+                   '-c', self.organism_type,
+                   '-m', str(self.min_telomere_length),
+                   '-p', genome_prefix]
+            
+            result = subprocess.run(cmd, cwd=str(self.telomere_dir),
+                                  capture_output=True, text=True)
             
             if result.returncode == 0:
-                logger.info("quartet analysis completed successfully")
+                logger.info("quartet TeloExplorer analysis completed successfully")
+                logger.info(f"Output prefix: {genome_prefix}")
                 self.results['telomere_gap'] = {
                     'tool': 'quartet',
                     'status': 'success',
-                    'output_dir': str(self.telomere_dir / 'quartet_output')
+                    'output_dir': str(self.telomere_dir),
+                    'prefix': genome_prefix,
+                    'organism_type': self.organism_type,
+                    'min_length': self.min_telomere_length
                 }
             else:
                 logger.error(f"quartet failed: {result.stderr}")
@@ -408,7 +432,7 @@ class GenomeQC:
             }
     
     def run_ltr_analysis(self):
-        """Run LTR analysis pipeline: ltrharvest, LTR_retriever, and LAI"""
+        """Run LTR analysis pipeline: ltrharvest, LTR_FINDER_parallel, LTR_retriever, and LAI"""
         logger.info("=" * 60)
         logger.info("Running LTR analysis pipeline")
         logger.info("=" * 60)
@@ -418,14 +442,22 @@ class GenomeQC:
                                                           channels=['bioconda', 'conda-forge'])
         ltr_retriever_env = self.env_manager.setup_software('ltr_retriever',
                                                              channels=['bioconda', 'conda-forge'])
+        ltr_finder_env = self.env_manager.setup_software('ltr_finder',
+                                                         channels=['bioconda', 'conda-forge'])
         
         try:
-            # Step 1: Create genome index for genometools
-            logger.info("Creating genome index...")
-            index_file = self.ltr_dir / f"{self.genome_fasta.stem}.index"
+            genome_name = self.genome_fasta.name
+            genome_stem = self.genome_fasta.stem
             
-            cmd_index = ['gt', 'suffixerator', '-db', str(self.genome_fasta),
-                        '-indexname', str(index_file), '-tis', '-suf', '-lcp', '-des', '-ssp']
+            # Step 1: Create genome index for genometools
+            logger.info("Creating genome index with gt suffixerator...")
+            index_prefix = self.ltr_dir / genome_stem
+            
+            # gt suffixerator with all required indices
+            cmd_index = ['gt', 'suffixerator',
+                        '-db', str(self.genome_fasta),
+                        '-indexname', str(index_prefix),
+                        '-tis', '-suf', '-lcp', '-des', '-ssp', '-sds', '-dna']
             
             result = self.env_manager.run_command(genometools_env, cmd_index,
                                                   capture_output=True, text=True)
@@ -435,28 +467,112 @@ class GenomeQC:
                 self.results['ltr_analysis'] = {'status': 'failed', 'error': 'Index creation failed'}
                 return
             
-            # Step 2: Run ltrharvest
-            logger.info("Running ltrharvest...")
-            ltr_output = self.ltr_dir / "ltrharvest.out"
+            logger.info("Genome index created successfully")
             
-            cmd_ltr = ['gt', 'ltrharvest', '-index', str(index_file),
-                      '-out', str(ltr_output), '-outinner', '-gff3', str(self.ltr_dir / 'ltrharvest.gff3')]
+            # Step 2: Run ltrharvest with specific parameters
+            logger.info("Running gt ltrharvest...")
+            harvest_scn = self.ltr_dir / f"{genome_stem}.harvest.scn"
+            
+            cmd_ltr = ['gt', '-j', str(self.threads), 'ltrharvest',
+                      '-index', str(index_prefix),
+                      '-minlenltr', '100',
+                      '-maxlenltr', '7000',
+                      '-mintsd', '4',
+                      '-maxtsd', '6',
+                      '-motif', 'TGCA',
+                      '-motifmis', '1',
+                      '-similar', '85',
+                      '-vic', '10',
+                      '-seed', '20',
+                      '-seqids', 'yes']
             
             result = self.env_manager.run_command(genometools_env, cmd_ltr,
                                                   capture_output=True, text=True)
             
-            if result.returncode != 0:
+            if result.returncode == 0:
+                # Save output to .scn file
+                harvest_scn.write_text(result.stdout)
+                logger.info(f"ltrharvest completed, output saved to {harvest_scn}")
+            else:
                 logger.error(f"ltrharvest failed: {result.stderr}")
                 self.results['ltr_analysis'] = {'status': 'failed', 'error': 'ltrharvest failed'}
                 return
             
-            logger.info("ltrharvest completed")
+            # Step 3: Run LTR_FINDER_parallel (if available)
+            logger.info("Running LTR_FINDER_parallel...")
             
-            # Step 3: Run LTR_retriever
+            # LTR_FINDER_parallel typically outputs to {genome_name}.finder.combine.scn
+            # But we need to check for various possible output filenames
+            finder_scn = None
+            possible_finder_files = [
+                self.ltr_dir / f"{genome_name}.finder.combine.scn",
+                self.ltr_dir / f"{genome_stem}.finder.combine.scn",
+                self.ltr_dir / f"{genome_name}.finder.scn"
+            ]
+            
+            # Check if LTR_FINDER_parallel is available
+            try:
+                cmd_finder = ['LTR_FINDER_parallel',
+                            '-seq', str(self.genome_fasta),
+                            '-threads', str(self.threads),
+                            '-harvest_out',
+                            '-size', '1000000']
+                
+                result = self.env_manager.run_command(ltr_finder_env, cmd_finder,
+                                                      cwd=str(self.ltr_dir),
+                                                      capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    logger.info("LTR_FINDER_parallel completed")
+                    # Find which output file was actually created
+                    for possible_file in possible_finder_files:
+                        if possible_file.exists():
+                            finder_scn = possible_file
+                            logger.info(f"Found LTR_FINDER output: {finder_scn}")
+                            break
+                else:
+                    logger.warning(f"LTR_FINDER_parallel warning: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"LTR_FINDER_parallel not available or failed: {e}")
+            
+            # Step 4: Combine harvest and finder results
+            logger.info("Combining LTR results...")
+            raw_ltr_scn = self.ltr_dir / f"{genome_name}.rawLTR.scn"
+            
+            # Combine the two .scn files carefully
+            # Read harvest content
+            harvest_content = ""
+            if harvest_scn.exists():
+                harvest_content = harvest_scn.read_text()
+            
+            # Read finder content if available
+            finder_content = ""
+            if finder_scn and finder_scn.exists():
+                finder_content = finder_scn.read_text()
+            
+            # Combine contents
+            # If both files exist, combine them; otherwise use whichever is available
+            if harvest_content and finder_content:
+                # Simple concatenation is acceptable for .scn format
+                # as LTR_retriever will handle deduplication and validation
+                combined_content = harvest_content.rstrip() + "\n" + finder_content
+            elif harvest_content:
+                combined_content = harvest_content
+            elif finder_content:
+                combined_content = finder_content
+            else:
+                logger.warning("No LTR results found from either ltrharvest or LTR_FINDER")
+                combined_content = ""
+            
+            raw_ltr_scn.write_text(combined_content)
+            logger.info(f"Combined LTR results saved to {raw_ltr_scn}")
+            
+            # Step 5: Run LTR_retriever
             logger.info("Running LTR_retriever...")
             
-            cmd_retriever = ['LTR_retriever', '-genome', str(self.genome_fasta),
-                           '-inharvest', str(self.ltr_dir / 'ltrharvest.gff3'),
+            cmd_retriever = ['LTR_retriever',
+                           '-genome', str(self.genome_fasta),
+                           '-inharvest', str(raw_ltr_scn),
                            '-threads', str(self.threads)]
             
             result = self.env_manager.run_command(ltr_retriever_env, cmd_retriever,
@@ -468,23 +584,38 @@ class GenomeQC:
             else:
                 logger.info("LTR_retriever completed")
             
-            # Step 4: Calculate LAI
-            logger.info("Calculating LAI...")
+            # Step 6: Calculate LAI (if LAI software is available)
+            logger.info("Checking for LAI software...")
+            pass_list = self.ltr_dir / f"{genome_name}.pass.list"
+            out_file = self.ltr_dir / f"{genome_name}.out"
             
-            lai_script = self.ltr_dir / 'calculate_lai.sh'
-            lai_script.write_text("""#!/bin/bash
-# LAI calculation placeholder
-# LAI requires LTR_retriever output and additional processing
-echo "LAI calculation would be performed here"
-echo "Requires: LAI software and LTR_retriever results"
-""")
-            lai_script.chmod(0o755)
+            if pass_list.exists() and out_file.exists():
+                try:
+                    cmd_lai = ['LAI',
+                              '-genome', str(self.genome_fasta),
+                              '-intact', str(pass_list),
+                              '-all', str(out_file),
+                              '-t', str(self.threads)]
+                    
+                    result = subprocess.run(cmd_lai, cwd=str(self.ltr_dir),
+                                          capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        logger.info("LAI calculation completed")
+                    else:
+                        logger.warning(f"LAI calculation warning: {result.stderr}")
+                except Exception as e:
+                    logger.warning(f"LAI software not available: {e}")
+            else:
+                logger.warning("LTR_retriever output files not found, skipping LAI calculation")
             
             self.results['ltr_analysis'] = {
                 'status': 'completed',
-                'ltrharvest_output': str(ltr_output),
+                'ltrharvest_output': str(harvest_scn),
+                'ltr_finder_output': str(finder_scn) if finder_scn and finder_scn.exists() else 'not available',
+                'combined_ltr': str(raw_ltr_scn),
                 'ltr_retriever_dir': str(self.ltr_dir),
-                'note': 'LAI calculation requires additional LAI software'
+                'lai_status': 'attempted'
             }
             
         except Exception as e:
@@ -510,11 +641,13 @@ echo "Requires: LAI software and LTR_retriever results"
                 '-o', str(self.quast_dir),
                 '-t', str(self.threads),
                 '--min-contig', '0',
-                '--plots-format', 'png'
+                '--plots-format', 'png',
+                '--large'  # Add --large flag for large genome assemblies
             ]
             
             if self.reference_genome and self.reference_genome.exists():
                 cmd.extend(['-r', str(self.reference_genome)])
+                logger.info(f"Using reference genome: {self.reference_genome}")
             
             result = self.env_manager.run_command(quast_env, cmd,
                                                   capture_output=True, text=True)
@@ -722,7 +855,8 @@ def main():
         epilog="""
 Example usage:
   %(prog)s -g genome.fasta -o results -t 16 -b eukaryota_odb10 bacteria_odb10
-  %(prog)s -g genome.fasta -o results -t 16 -b /path/to/local/busco_db -r reference.fasta
+  %(prog)s -g genome.fasta -o results -t 16 -b /path/to/local/busco_db -r reference.fasta -c plant
+  %(prog)s -g genome.fasta -o results -t 16 -b eukaryota_odb10 -c plant -m 50
         """
     )
     
@@ -736,6 +870,12 @@ Example usage:
                        help='BUSCO database(s) - can specify multiple databases or local paths')
     parser.add_argument('-r', '--reference', default=None,
                        help='Reference genome for synteny analysis (optional)')
+    parser.add_argument('-c', '--organism-type', dest='organism_type', default='plant',
+                       choices=['plant', 'animal', 'fungi', 'protist'],
+                       help='Organism type for quartet telomere analysis (default: plant)')
+    parser.add_argument('-m', '--min-telomere-length', dest='min_telomere_length',
+                       type=int, default=50,
+                       help='Minimum telomere length for quartet analysis (default: 50)')
     
     args = parser.parse_args()
     
@@ -754,7 +894,9 @@ Example usage:
         output_dir=args.output,
         threads=args.threads,
         busco_dbs=args.busco,
-        reference_genome=args.reference
+        reference_genome=args.reference,
+        organism_type=args.organism_type,
+        min_telomere_length=args.min_telomere_length
     )
     
     pipeline.run_pipeline()

@@ -34,8 +34,12 @@ This document describes how the genomic QC pipeline implements all specified req
 **Implementation**:
 - **Telomere/Gap Analysis** (`run_telomere_gap_analysis`): 
   - Checks for quartet availability
+  - Uses quartet.py TeloExplorer subcommand with proper parameters:
+    - `-c` for organism type (plant/animal/fungi/protist)
+    - `-m` for minimum telomere length
+    - `-p` for output prefix
   - Falls back to seqkit for basic statistics
-  - Lines 245-297
+  - Lines 231-270
   
 - **BUSCO** (`run_busco`):
   - Supports multiple databases
@@ -49,15 +53,20 @@ This document describes how the genomic QC pipeline implements all specified req
   - Lines 371-386
   
 - **LTR Analysis** (`run_ltr_analysis`):
-  - Integrates ltrharvest (via genometools)
-  - Runs LTR_retriever
-  - Prepares for LAI calculation
-  - Lines 388-456
+  - Complete LTR analysis pipeline:
+    - gt suffixerator with all required indices (-tis, -suf, -lcp, -des, -ssp, -sds, -dna)
+    - gt ltrharvest with specific parameters (minlenltr, maxlenltr, mintsd, maxtsd, motif, etc.)
+    - LTR_FINDER_parallel with harvest output format
+    - Combines harvest and finder results into rawLTR.scn
+    - LTR_retriever for filtering and annotation
+    - LAI calculation (if LAI software available)
+  - Lines 420-580
   
 - **QUAST** (`run_quast`):
   - Calculates N50 and comprehensive assembly statistics
+  - Uses --large flag for large genome assemblies
   - Optionally uses reference genome
-  - Lines 458-500
+  - Lines 582-635
   
 - **Synteny** (`run_synteny_analysis`):
   - Only runs if reference genome provided
@@ -72,7 +81,10 @@ This document describes how the genomic QC pipeline implements all specified req
 - Command-line argument parser with all required parameters
 - Validation of file existence
 - Support for multiple BUSCO databases
-- Lines 698-725
+- Additional parameters:
+  - `-c/--organism-type`: Organism type for quartet (plant/animal/fungi/protist)
+  - `-m/--min-telomere-length`: Minimum telomere length for quartet
+- Lines 745-802
 
 #### 4. Output Structure
 
@@ -128,8 +140,12 @@ This document describes how the genomic QC pipeline implements all specified req
 **实现**:
 - **端粒/Gap分析** (`run_telomere_gap_analysis`): 
   - 检查quartet可用性
+  - 使用quartet.py TeloExplorer子命令及适当参数:
+    - `-c` 指定生物类型 (plant/animal/fungi/protist)
+    - `-m` 指定最小端粒长度
+    - `-p` 指定输出前缀
   - 回退到seqkit进行基本统计
-  - 第245-297行
+  - 第231-270行
   
 - **BUSCO** (`run_busco`):
   - 支持多个数据库
@@ -143,15 +159,20 @@ This document describes how the genomic QC pipeline implements all specified req
   - 第371-386行
   
 - **LTR分析** (`run_ltr_analysis`):
-  - 集成ltrharvest（通过genometools）
-  - 运行LTR_retriever
-  - 为LAI计算做准备
-  - 第388-456行
+  - 完整的LTR分析流程:
+    - gt suffixerator 创建所有必需索引 (-tis, -suf, -lcp, -des, -ssp, -sds, -dna)
+    - gt ltrharvest 使用特定参数 (minlenltr, maxlenltr, mintsd, maxtsd, motif等)
+    - LTR_FINDER_parallel 生成harvest格式输出
+    - 合并harvest和finder结果为rawLTR.scn
+    - LTR_retriever 进行过滤和注释
+    - LAI计算（如果LAI软件可用）
+  - 第420-580行
   
 - **QUAST** (`run_quast`):
   - 计算N50和全面的组装统计
+  - 使用--large标志处理大型基因组组装
   - 可选使用参考基因组
-  - 第458-500行
+  - 第582-635行
   
 - **共线性** (`run_synteny_analysis`):
   - 仅在提供参考基因组时运行
@@ -166,7 +187,10 @@ This document describes how the genomic QC pipeline implements all specified req
 - 包含所有必需参数的命令行参数解析器
 - 文件存在性验证
 - 支持多个BUSCO数据库
-- 第698-725行
+- 附加参数:
+  - `-c/--organism-type`: quartet使用的生物类型 (plant/animal/fungi/protist)
+  - `-m/--min-telomere-length`: quartet使用的最小端粒长度
+- 第745-802行
 
 #### 4. 输出结构
 
@@ -200,13 +224,21 @@ python genomeQC.py -g genome.fasta -o results -t 32 -b eukaryota_odb10 metazoa_o
 # 使用本地BUSCO数据库
 python genomeQC.py -g genome.fasta -o results -t 16 -b /path/to/eukaryota_odb10
 
+# 植物基因组分析（类似问题描述中的示例）
+python genomeQC.py -g genome.fasta -o results -t 20 -b embryophyta_odb10 -c plant -m 50
+
 # 包含参考基因组进行共线性分析
-python genomeQC.py -g genome.fasta -o results -t 32 -b eukaryota_odb10 -r reference.fasta
+python genomeQC.py -g genome.fasta -o results -t 32 -b eukaryota_odb10 -r reference.fasta -c plant -m 50
 ```
 
 ### 注意事项
 
 1. **quartet**: 必须单独安装，如不可用则使用seqkit（无可视化）
+   - 使用TeloExplorer子命令
+   - 支持organism type配置（-c参数）
+   - 支持最小端粒长度配置（-m参数）
 2. **GenomeSyn**: 必须单独安装，如不可用且提供了参考基因组，将输出警告并跳过
 3. **Merqury**: 需要原始测序reads生成k-mer数据库（当前版本跳过）
 4. **LAI**: 需要额外的LAI软件安装才能完成计算
+5. **LTR_FINDER_parallel**: 可选工具，如不可用则仅使用ltrharvest结果
+6. **QUAST**: 使用--large标志适用于大型基因组

@@ -71,6 +71,12 @@ python genomeQC.py -g genome.fasta -o results -t 16 -b /path/to/busco_downloads/
 python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 -r reference.fasta
 ```
 
+### With Organism Type and Telomere Parameters
+
+```bash
+python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 -c plant -m 50
+```
+
 ### Full Example
 
 ```bash
@@ -79,7 +85,9 @@ python genomeQC.py \
     --output ./qc_results \
     --threads 32 \
     --busco eukaryota_odb10 metazoa_odb10 \
-    --reference reference_genome.fasta
+    --reference reference_genome.fasta \
+    --organism-type plant \
+    --min-telomere-length 50
 ```
 
 ## Command Line Arguments
@@ -89,6 +97,8 @@ python genomeQC.py \
 - `-t, --threads`: Number of threads to use (default: 1)
 - `-b, --busco`: BUSCO database(s) - can specify multiple databases or local paths (required)
 - `-r, --reference`: Reference genome for synteny analysis (optional)
+- `-c, --organism-type`: Organism type for quartet telomere analysis (choices: plant, animal, fungi, protist; default: plant)
+- `-m, --min-telomere-length`: Minimum telomere length for quartet analysis (default: 50)
 
 ## Output Structure
 
@@ -126,9 +136,13 @@ The pipeline uses intelligent environment management:
 ### Special Tools
 
 - **quartet**: Must be installed separately (not available in conda)
+  - Supports TeloExplorer subcommand with organism-specific configurations
+  - Parameters: `-c` for organism type (plant/animal/fungi/protist) and `-m` for minimum telomere length
   - If unavailable, pipeline uses seqkit as fallback (no visualization)
 - **GenomeSyn**: Must be installed separately (not available in conda)
   - If unavailable and reference genome provided, pipeline issues warning and skips
+- **LTR_FINDER_parallel**: Optional for LTR analysis
+  - If unavailable, only ltrharvest results are used
 
 ## Notes
 
