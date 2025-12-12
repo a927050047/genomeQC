@@ -33,13 +33,24 @@
 #     --threads 16 \
 #     --busco /path/to/busco_downloads/lineages/eukaryota_odb10
 
-# Example 5: Full pipeline with all options
+# Example 5: Plant genome with quartet telomere analysis
+# python genomeQC.py \
+#     --genome /path/to/genome.fasta \
+#     --output ./results \
+#     --threads 20 \
+#     --busco embryophyta_odb10 \
+#     --organism-type plant \
+#     --min-telomere-length 50
+
+# Example 6: Full pipeline with all options
 python genomeQC.py \
     --genome genome.fasta \
     --output qc_results \
     --threads 32 \
     --busco eukaryota_odb10 metazoa_odb10 \
-    --reference reference.fasta
+    --reference reference.fasta \
+    --organism-type plant \
+    --min-telomere-length 50
 
 echo "Pipeline execution completed!"
 echo "Check the results in the output directory"
