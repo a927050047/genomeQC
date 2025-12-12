@@ -805,23 +805,25 @@ class GenomeQC:
             # Generate PBS job for coverage analysis
             genome_name = self.genome_fasta.stem
             sam_file = self.coverage_dir / f"{genome_name}.sam"
-            bam_file = self.coverage_dir / f"{genome_name}.bam"
             sorted_bam = self.coverage_dir / f"{genome_name}.sorted.bam"
             
             # Build alignment and coverage commands
             reads_str = ' '.join(str(r) for r in self.reads)
             commands = [
+                "# Enable pipefail for better error handling",
+                "set -o pipefail",
+                "",
                 "# Step 1: Align reads to assembly with minimap2",
                 f"micromamba run -n minimap2 minimap2 -ax map-ont -t {self.threads} {self.genome_fasta} {reads_str} > {sam_file}",
                 "",
                 "# Step 2: Convert SAM to BAM and sort",
-                f"micromamba run -n samtools samtools view -@ {self.threads} -b {sam_file} | samtools sort -@ {self.threads} -o {sorted_bam}",
+                f"micromamba run -n samtools samtools view -@ {self.threads} -b {sam_file} | micromamba run -n samtools samtools sort -@ {self.threads} -o {sorted_bam}",
                 "",
                 "# Step 3: Index BAM file",
                 f"micromamba run -n samtools samtools index {sorted_bam}",
                 "",
-                "# Step 4: Calculate coverage with mosdepth",
-                f"micromamba run -n mosdepth mosdepth -t {self.threads} {genome_name} {sorted_bam}",
+                "# Step 4: Calculate coverage with mosdepth (output in coverage directory)",
+                f"cd {self.coverage_dir} && micromamba run -n mosdepth mosdepth -t {self.threads} {genome_name} {sorted_bam}",
                 "",
                 "# Clean up intermediate SAM file to save space",
                 f"rm -f {sam_file}"
@@ -851,7 +853,6 @@ class GenomeQC:
         try:
             genome_name = self.genome_fasta.stem
             sam_file = self.coverage_dir / f"{genome_name}.sam"
-            bam_file = self.coverage_dir / f"{genome_name}.bam"
             sorted_bam = self.coverage_dir / f"{genome_name}.sorted.bam"
             
             # Step 1: Align reads with minimap2
