@@ -6,7 +6,8 @@ Comprehensive genome quality control pipeline that evaluates genome assemblies u
 
 - **Telomere and Gap Analysis**: Uses quartet (with visualization) or seqkit (fallback)
 - **Completeness Assessment**: BUSCO analysis with support for multiple databases
-- **Quality Value**: Merqury QV calculation (requires sequencing reads)
+- **Quality Value**: Merqury QV calculation (optional, requires sequencing reads)
+- **Coverage Analysis**: Alignment and coverage calculation using minimap2 and mosdepth (optional, requires sequencing reads)
 - **LTR Analysis**: ltrharvest, LTR_retriever, and LAI calculation
 - **Assembly Statistics**: QUAST for N50, L50, and other metrics
 - **Synteny Analysis**: GenomeSyn for comparative genomics (optional)
@@ -23,7 +24,10 @@ Comprehensive genome quality control pipeline that evaluates genome assemblies u
 The pipeline automatically manages dependencies using micromamba:
 - seqkit
 - busco
-- merqury
+- merqury (optional, for QV calculation with reads)
+- minimap2 (optional, for read alignment)
+- samtools (optional, for BAM file processing)
+- mosdepth (optional, for coverage analysis)
 - genometools (for ltrharvest)
 - ltr_retriever
 - quast
@@ -78,6 +82,16 @@ python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 -r refere
 python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 -c plant -m 50
 ```
 
+### With Sequencing Reads for Merqury and Coverage Analysis
+
+```bash
+# Single reads file
+python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 --reads reads.fastq.gz
+
+# Multiple reads files
+python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 --reads reads1.fastq.gz reads2.fastq.gz
+```
+
 ### Full Example
 
 ```bash
@@ -120,11 +134,28 @@ python genomeQC.py \
 In cluster mode, each software or software group runs as a separate PBS job:
 - `TELOMERE_GAP`: Telomere and gap analysis
 - `BUSCO_<database>`: BUSCO analysis (one job per database)
+- `MERQURY`: Merqury QV calculation (if reads provided)
+- `COVERAGE`: Coverage analysis with minimap2 and mosdepth (if reads provided)
 - `LTR_ANALYSIS`: Complete LTR analysis pipeline
 - `QUAST`: Assembly statistics
 - `SYNTENY`: Synteny analysis (if reference provided)
 
 Generated PBS scripts are saved in `<output_dir>/pbs_scripts/` with proper PBS directives, logging setup, and environment activation.
+
+### Cluster Mode with Sequencing Reads
+
+```bash
+# With reads for Merqury and coverage analysis
+python genomeQC.py \
+    --genome my_assembly.fasta \
+    --output ./qc_results \
+    --threads 60 \
+    --busco eukaryota_odb10 \
+    --reads reads.fastq.gz \
+    --cluster \
+    --pbs-queue high \
+    --pbs-ppn 60
+```
 
 ## Command Line Arguments
 
@@ -136,6 +167,7 @@ Generated PBS scripts are saved in `<output_dir>/pbs_scripts/` with proper PBS d
 - `-r, --reference`: Reference genome for synteny analysis (optional)
 - `-c, --organism-type`: Organism type for quartet telomere analysis (choices: plant, animal, fungi, protist; default: plant)
 - `-m, --min-telomere-length`: Minimum telomere length for quartet analysis (default: 50)
+- `--reads`: Sequencing reads (FASTQ/FASTA) for Merqury QV calculation and coverage analysis (optional, can specify multiple files)
 
 ### Cluster Mode Arguments
 - `--cluster`: Enable cluster mode - generate PBS job scripts instead of running directly
@@ -154,6 +186,8 @@ output_directory/
 ├── pbs_scripts/                # PBS job scripts (cluster mode only)
 │   ├── TELOMERE_GAP.pbs
 │   ├── BUSCO_*.pbs
+│   ├── MERQURY.pbs             # (if reads provided)
+│   ├── COVERAGE.pbs            # (if reads provided)
 │   ├── LTR_ANALYSIS.pbs
 │   ├── QUAST.pbs
 │   └── SYNTENY.pbs
@@ -165,7 +199,15 @@ output_directory/
 │   ├── log/                    # Job logs (cluster mode)
 │   ├── busco_eukaryota_odb10/
 │   └── ...
-├── merqury/                    # Merqury QV results
+├── merqury/                    # Merqury QV results (if reads provided)
+│   ├── log/                    # Job logs (cluster mode)
+│   ├── *.qv                    # QV scores
+│   └── *.completeness.stats    # Completeness statistics
+├── coverage/                   # Coverage analysis (if reads provided)
+│   ├── log/                    # Job logs (cluster mode)
+│   ├── *.sorted.bam            # Aligned reads
+│   ├── *.mosdepth.summary.txt  # Coverage summary
+│   └── *.mosdepth.global.dist.txt  # Coverage distribution
 ├── ltr_analysis/               # LTR and LAI analysis
 │   ├── log/                    # Job logs (cluster mode)
 │   ├── ltrharvest.out
@@ -202,7 +244,13 @@ The pipeline uses intelligent environment management:
 
 ## Notes
 
-- **Merqury QV**: Requires raw sequencing reads for k-mer database generation (currently skipped if reads not provided)
+- **Merqury QV**: Requires raw sequencing reads for k-mer database generation. Provide reads with `--reads` option.
+  - Uses meryl to count k-mers (k=21) from sequencing reads
+  - Calculates assembly quality value (QV) and completeness
+- **Coverage Analysis**: Requires raw sequencing reads for alignment and coverage calculation. Provide reads with `--reads` option.
+  - Uses minimap2 for alignment (with map-ont preset for Nanopore reads; adjust as needed)
+  - Uses samtools for BAM file processing
+  - Uses mosdepth for coverage depth and distribution analysis
 - **LAI Calculation**: Requires additional LAI software installation
 - **quartet**: Provides visualization capabilities for telomere analysis; fallback to seqkit for basic stats only
 - **GenomeSyn**: Only runs when both the tool and reference genome are available
