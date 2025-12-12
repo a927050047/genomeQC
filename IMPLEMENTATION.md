@@ -48,9 +48,24 @@ This document describes how the genomic QC pipeline implements all specified req
   - Lines 299-369
   
 - **Merqury** (`run_merqury`):
-  - Documents requirement for raw reads
-  - Skips with informative message
-  - Lines 371-386
+  - Accepts optional sequencing reads via `--reads` parameter
+  - Skips with informative message if no reads provided
+  - When reads provided:
+    - Uses meryl to count k-mers (k=21) from reads
+    - Runs merqury.sh to calculate QV and completeness
+    - Supports both cluster and direct execution modes
+  - Lines 676-787
+  
+- **Coverage Analysis** (`run_coverage_analysis`):
+  - NEW: Added coverage analysis using minimap2 and mosdepth
+  - Accepts optional sequencing reads via `--reads` parameter
+  - Skips if no reads provided
+  - When reads provided:
+    - Aligns reads to assembly using minimap2 (map-ont preset)
+    - Converts SAM to sorted BAM using samtools
+    - Calculates coverage depth and distribution using mosdepth
+    - Supports both cluster and direct execution modes
+  - Lines 789-995
   
 - **LTR Analysis** (`run_ltr_analysis`):
   - Complete LTR analysis pipeline:
@@ -75,16 +90,18 @@ This document describes how the genomic QC pipeline implements all specified req
 
 #### 3. Input Parameters
 
-**Requirement**: Accept genome FASTA, threads, BUSCO databases (multiple, local paths supported), output path, optional reference
+**Requirement**: Accept genome FASTA, threads, BUSCO databases (multiple, local paths supported), output path, optional reference, optional sequencing reads
 
 **Implementation**:
 - Command-line argument parser with all required parameters
 - Validation of file existence
 - Support for multiple BUSCO databases
+- Support for multiple sequencing reads files
 - Additional parameters:
   - `-c/--organism-type`: Organism type for quartet (plant/animal/fungi/protist)
   - `-m/--min-telomere-length`: Minimum telomere length for quartet
-- Lines 745-802
+  - `--reads`: Sequencing reads (FASTQ/FASTA) for Merqury and coverage analysis (optional, multiple files)
+- Lines 1519-1600
 
 #### 4. Output Structure
 
@@ -99,12 +116,13 @@ This document describes how the genomic QC pipeline implements all specified req
   ├── telomere_gap/
   ├── busco/
   ├── merqury/
+  ├── coverage/
   ├── ltr_analysis/
   ├── quast/
   └── synteny/
   ```
-- Comprehensive JSON and text summaries
-- Lines 548-651
+- Comprehensive JSON and text summaries including coverage analysis results
+- Lines 1382-1475
 
 #### 5. Cluster Support (PBS/Torque)
 
@@ -122,6 +140,8 @@ This document describes how the genomic QC pipeline implements all specified req
 - Separate PBS jobs for each pipeline component:
   - `TELOMERE_GAP`: Telomere and gap analysis
   - `BUSCO_<database>`: One job per BUSCO database
+  - `MERQURY`: Merqury QV calculation (if reads provided)
+  - `COVERAGE`: Coverage analysis with minimap2 and mosdepth (if reads provided)
   - `LTR_ANALYSIS`: Complete LTR pipeline (ltrharvest, LTR_FINDER, LTR_retriever, LAI)
   - `QUAST`: Assembly statistics
   - `SYNTENY`: Synteny analysis (if reference provided)
@@ -183,9 +203,24 @@ This document describes how the genomic QC pipeline implements all specified req
   - 第299-369行
   
 - **Merqury** (`run_merqury`):
-  - 记录需要原始reads的要求
-  - 跳过并提供信息性消息
-  - 第371-386行
+  - 通过`--reads`参数接受可选的测序数据
+  - 如果未提供reads则跳过并显示提示信息
+  - 当提供reads时:
+    - 使用meryl从reads计数k-mer (k=21)
+    - 运行merqury.sh计算QV和完整性
+    - 支持集群和直接执行模式
+  - 第676-787行
+  
+- **覆盖度分析** (`run_coverage_analysis`):
+  - 新增：使用minimap2和mosdepth进行覆盖度分析
+  - 通过`--reads`参数接受可选的测序数据
+  - 如果未提供reads则跳过
+  - 当提供reads时:
+    - 使用minimap2将reads比对到组装序列 (map-ont预设)
+    - 使用samtools将SAM转换为排序的BAM
+    - 使用mosdepth计算覆盖深度和分布
+    - 支持集群和直接执行模式
+  - 第789-995行
   
 - **LTR分析** (`run_ltr_analysis`):
   - 完整的LTR分析流程:
@@ -210,16 +245,18 @@ This document describes how the genomic QC pipeline implements all specified req
 
 #### 3. 输入参数
 
-**需求**: 接受基因组fasta，线程数，busco数据库（可多个，可本地路径），输出路径，可选参考基因组
+**需求**: 接受基因组fasta，线程数，busco数据库（可多个，可本地路径），输出路径，可选参考基因组，可选测序数据
 
 **实现**:
 - 包含所有必需参数的命令行参数解析器
 - 文件存在性验证
 - 支持多个BUSCO数据库
+- 支持多个测序reads文件
 - 附加参数:
   - `-c/--organism-type`: quartet使用的生物类型 (plant/animal/fungi/protist)
   - `-m/--min-telomere-length`: quartet使用的最小端粒长度
-- 第745-802行
+  - `--reads`: 测序数据 (FASTQ/FASTA) 用于Merqury和覆盖度分析（可选，可多个文件）
+- 第1519-1600行
 
 #### 4. 输出结构
 
@@ -234,12 +271,13 @@ This document describes how the genomic QC pipeline implements all specified req
   ├── telomere_gap/
   ├── busco/
   ├── merqury/
+  ├── coverage/
   ├── ltr_analysis/
   ├── quast/
   └── synteny/
   ```
-- 全面的JSON和文本摘要
-- 第548-651行
+- 全面的JSON和文本摘要，包括覆盖度分析结果
+- 第1382-1475行
 
 #### 5. 集群支持 (PBS/Torque)
 
@@ -257,6 +295,8 @@ This document describes how the genomic QC pipeline implements all specified req
 - 每个流程组件单独的PBS作业:
   - `TELOMERE_GAP`: 端粒和gap分析
   - `BUSCO_<database>`: 每个BUSCO数据库一个作业
+  - `MERQURY`: Merqury QV计算（如果提供reads）
+  - `COVERAGE`: 使用minimap2和mosdepth的覆盖度分析（如果提供reads）
   - `LTR_ANALYSIS`: 完整的LTR流程 (ltrharvest, LTR_FINDER, LTR_retriever, LAI)
   - `QUAST`: 组装统计
   - `SYNTENY`: 共线性分析（如果提供参考基因组）
@@ -288,11 +328,20 @@ python genomeQC.py -g genome.fasta -o results -t 20 -b embryophyta_odb10 -c plan
 # 包含参考基因组进行共线性分析
 python genomeQC.py -g genome.fasta -o results -t 32 -b eukaryota_odb10 -r reference.fasta -c plant -m 50
 
+# 使用测序数据进行Merqury和覆盖度分析
+python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 --reads reads.fastq.gz
+
+# 使用多个测序文件
+python genomeQC.py -g genome.fasta -o results -t 16 -b eukaryota_odb10 --reads reads1.fastq.gz reads2.fastq.gz
+
 # 集群模式 - 生成并提交PBS作业
 python genomeQC.py -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --pbs-queue high --pbs-ppn 60
 
 # 集群模式 - 仅生成脚本不提交（dry run）
 python genomeQC.py -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster --dry-run
+
+# 集群模式 - 使用测序数据
+python genomeQC.py -g genome.fasta -o results -t 60 -b eukaryota_odb10 --reads reads.fastq.gz --cluster
 ```
 
 ### 注意事项
@@ -302,7 +351,13 @@ python genomeQC.py -g genome.fasta -o results -t 60 -b eukaryota_odb10 --cluster
    - 支持organism type配置（-c参数）
    - 支持最小端粒长度配置（-m参数）
 2. **GenomeSyn**: 必须单独安装，如不可用且提供了参考基因组，将输出警告并跳过
-3. **Merqury**: 需要原始测序reads生成k-mer数据库（当前版本跳过）
-4. **LAI**: 需要额外的LAI软件安装才能完成计算
-5. **LTR_FINDER_parallel**: 可选工具，如不可用则仅使用ltrharvest结果
-6. **QUAST**: 使用--large标志适用于大型基因组
+3. **Merqury**: 需要原始测序reads生成k-mer数据库。通过`--reads`选项提供reads。
+   - 使用meryl从测序reads计数k-mer (k=21)
+   - 计算组装质量值(QV)和完整性
+4. **覆盖度分析**: 需要原始测序reads进行比对和覆盖度计算。通过`--reads`选项提供reads。
+   - 使用minimap2进行比对（使用map-ont预设用于Nanopore reads；根据需要调整）
+   - 使用samtools处理BAM文件
+   - 使用mosdepth进行覆盖深度和分布分析
+5. **LAI**: 需要额外的LAI软件安装才能完成计算
+6. **LTR_FINDER_parallel**: 可选工具，如不可用则仅使用ltrharvest结果
+7. **QUAST**: 使用--large标志适用于大型基因组
